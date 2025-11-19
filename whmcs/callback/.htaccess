@@ -1,0 +1,4 @@
+<IfModule mod_auth.c>
+  AuthType None
+  Require all granted
+</IfModule>
