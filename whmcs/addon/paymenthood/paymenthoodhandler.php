@@ -27,7 +27,7 @@ class PaymentHoodHandler
         if (is_string($request)) {
             $request = ['data' => $request];
         }
-        
+
         // In some WHMCS contexts (like addons), logModuleCall might not be available
         if (function_exists('logModuleCall')) {
             if ($trace !== null) {
@@ -35,7 +35,7 @@ class PaymentHoodHandler
             }
             return logModuleCall(self::PAYMENTHOOD_GATEWAY, $action, $request, $response);
         }
-        
+
         // Fallback logging for contexts where logModuleCall isn't available
         $logData = [
             'module' => self::PAYMENTHOOD_GATEWAY,
@@ -73,7 +73,7 @@ class PaymentHoodHandler
                     ->whereIn('ii.type', ['Hosting', 'Product', 'Product/Service'])
                     ->whereNotIn('h.billingcycle', ['Free', 'Free Account', 'One Time'])
                     ->exists();
-                $checkoutMethods = $hasSubscription ? ["VerifiedPaymentMethod"] : null;
+                //$checkoutMethods = $hasSubscription ? ["VerifiedPaymentMethod"] : null;
 
                 $postData = [
                     "referenceId" => $invoiceId,
@@ -81,6 +81,7 @@ class PaymentHoodHandler
                     "currency" => $currency,
                     "autoCapture" => true,
                     "webhookUrl" => $callbackUrl,
+                    "showAvailablePaymentMethodsInCheckout" => $hasSubscription,
                     "customerOrder" => [
                         "customer" => [
                             "customerId" => (string) ($params['clientdetails']['userid'] ?? ''),
@@ -89,9 +90,9 @@ class PaymentHoodHandler
                     ],
                     "returnUrl" => $callbackUrl
                 ];
-                if (!is_null($checkoutMethods)) {
-                    $postData['checkoutMethods'] = $checkoutMethods;
-                }
+                // if (!is_null($checkoutMethods)) {
+                //     $postData['checkoutMethods'] = $checkoutMethods;
+                // }
 
                 $response = self::callApi(self::paymenthood_getPaymentBaseUrl() . "/apps/{$appId}/payments/hosted-page", $postData, $token);
                 self::safeLogModuleCall('result of create payment', $response);
@@ -190,7 +191,7 @@ class PaymentHoodHandler
             $appId = $credentials['appId'];
             $token = $credentials['token'];
 
-                self::safeLogModuleCall('createAutoPayment', ['appId' => $appId]);
+            self::safeLogModuleCall('createAutoPayment', ['appId' => $appId]);
 
             $postData = [
                 "referenceId" => $invoiceId,
@@ -224,7 +225,7 @@ class PaymentHoodHandler
                 'rawdata' => $ex->getMessage(),
             ];
         }
-   }
+    }
 
     private static function getWebhookUrl(): string
     {
@@ -259,7 +260,7 @@ class PaymentHoodHandler
 
             return json_decode($response, true) ?? [];
         } catch (\Exception $ex) {
-            self::safeLogModuleCall( 'app call error', $httpCode, [], $ex->getMessage());
+            self::safeLogModuleCall('app call error', $httpCode, [], $ex->getMessage());
             throw $ex;
         }
     }
@@ -273,11 +274,11 @@ class PaymentHoodHandler
                 'status' => 'Cancelled',
             ];
             $results = localAPI($command, $postData);
-            
+
             if ($results['result'] !== 'success') {
                 throw new \Exception('Failed to cancel invoice: ' . ($results['message'] ?? 'Unknown error'));
             }
-            
+
             self::safeLogModuleCall('invoice cancelled', ['invoiceId' => $invoiceId]);
         } catch (\Exception $ex) {
             self::safeLogModuleCall('invoice cancel error', ['invoiceId' => $invoiceId], ['error' => $ex->getMessage()]);
