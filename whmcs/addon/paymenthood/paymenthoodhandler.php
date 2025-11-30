@@ -90,9 +90,6 @@ class PaymentHoodHandler
                     ],
                     "returnUrl" => $callbackUrl
                 ];
-                // if (!is_null($checkoutMethods)) {
-                //     $postData['checkoutMethods'] = $checkoutMethods;
-                // }
 
                 $response = self::callApi(self::paymenthood_getPaymentBaseUrl() . "/apps/{$appId}/payments/hosted-page", $postData, $token);
                 self::safeLogModuleCall('result of create payment', $response);
@@ -114,8 +111,19 @@ class PaymentHoodHandler
             } else {
                 // GET request or render page logic
                 self::safeLogModuleCall('render page', []);
-                self::checkInvoiceStatus($invoiceId, $appId, $token);
-                return ''; // hide complete order button
+                // Check remote payment status but do not influence WHMCS UI;
+                // we want the core "Pay Now" button behaviour.
+                //self::checkInvoiceStatus2($invoiceId, $appId, $token);
+                
+                // Return HTML form that submits back to this page as POST
+                $systemUrl = self::getSystemUrl();
+                $formAction = $systemUrl . 'viewinvoice.php?id=' . $invoiceId;
+                
+                return '<form method="post" action="' . htmlspecialchars($formAction) . '">
+                    <input type="hidden" name="invoiceid" value="' . htmlspecialchars($invoiceId) . '" />
+                    <input type="hidden" name="paymentmethod" value="' . self::PAYMENTHOOD_GATEWAY . '" />
+                    <button type="submit" class="btn btn-success btn-block">Pay Now with PaymentHood</button>
+                </form>';
             }
         } catch (\Throwable $ex) {
             self::safeLogModuleCall('handler_exception', $params, $ex->getMessage(), $ex->getTraceAsString());
@@ -253,14 +261,28 @@ class PaymentHoodHandler
             $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
             curl_close($ch);
 
+            if ($httpCode === 404) {
+                self::safeLogModuleCall('API not found (404)', ['url' => $url], ['httpCode' => $httpCode, 'response' => $response]);
+                return [
+                    '_httpCode' => 404,
+                    '_rawResponse' => $response,
+                ];
+            }
+
             if (!$response || $httpCode >= 400) {
                 self::safeLogModuleCall('API error', ['response' => $response], ['httpCode' => $httpCode]);
                 throw new \Exception($response);
             }
 
-            return json_decode($response, true) ?? [];
+            $decoded = json_decode($response, true);
+            if (!is_array($decoded)) {
+                $decoded = [];
+            }
+
+            $decoded['_httpCode'] = $httpCode;
+            return $decoded;
         } catch (\Exception $ex) {
-            self::safeLogModuleCall('app call error', $httpCode, [], $ex->getMessage());
+            self::safeLogModuleCall('app call error', isset($httpCode) ? $httpCode : null, [], $ex->getMessage());
             throw $ex;
         }
     }
@@ -294,11 +316,64 @@ class PaymentHoodHandler
             return;
         }
 
-        $url = self::getPaymentBaseUrl() . "/v1/apps/{$appId}/payments/referenceId:$invoiceId";
+        $url = self::paymenthood_getPaymentBaseUrl() . "/v1/apps/{$appId}/payments/referenceId:$invoiceId";
         $response = self::callApi($url, [], $token, 'GET');
 
         if (!$response) {
             self::cancelInvoice($invoiceId);
+        }
+    }
+
+    /**
+     * Enhanced invoice status check that treats 404 as "no payment found",
+     * allowing the customer to pay again instead of cancelling the invoice.
+     */
+    private static function checkInvoiceStatus2(string $invoiceId, string $appId, string $token)
+    {
+        $status = Capsule::table('tblinvoices')->where('id', $invoiceId)->value('status');
+        self::safeLogModuleCall('checkInvoiceStatus2', ['invoiceId' => $invoiceId], ['status' => $status]);
+
+        // If invoice is not unpaid, nothing to do.
+        if ($status !== 'Unpaid') {
+            return;
+        }
+
+        $url = self::paymenthood_getPaymentBaseUrl() . "/v1/apps/{$appId}/payments/referenceId:$invoiceId";
+
+        try {
+            $response = self::callApi($url, [], $token, 'GET');
+
+            $httpCode = $response['_httpCode'] ?? null;
+
+            // If payment API returns 404, we assume no existing payment.
+            // Do NOT cancel invoice so client can try to pay again.
+            if ($httpCode === 404) {
+                self::safeLogModuleCall('checkInvoiceStatus2 - payment not found, allowing retry', [
+                    'invoiceId' => $invoiceId,
+                    'url' => $url,
+                ], [
+                    'httpCode' => $httpCode,
+                ]);
+                return;
+            }
+
+            // If API returned something falsy (empty array / null) and it is not 404,
+            // fall back to previous behaviour: cancel invoice.
+            if (!$response) {
+                self::safeLogModuleCall('checkInvoiceStatus2 - empty response, cancelling invoice', [
+                    'invoiceId' => $invoiceId,
+                    'url' => $url,
+                ]);
+                self::cancelInvoice($invoiceId);
+            }
+        } catch (\Throwable $ex) {
+            // On any exception, log and leave invoice untouched so customer can retry.
+            self::safeLogModuleCall('checkInvoiceStatus2_exception', [
+                'invoiceId' => $invoiceId,
+                'url' => $url,
+            ], [
+                'error' => $ex->getMessage(),
+            ], $ex->getTraceAsString());
         }
     }
 
